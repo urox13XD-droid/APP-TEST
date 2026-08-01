@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      ONELINE_CORS_ORIGINS: "http://localhost:3000"
+      # ONELINE_SEGMENTER: opencv   # set to "sam2" + the two vars below to
+      # ONELINE_SAM2_CHECKPOINT: /app/models/sam2_hiera_large.pt   # use Segment Anything 2 instead
+      # ONELINE_SAM2_MODEL_CFG: sam2_hiera_l.yaml
+    volumes:
+      - backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  backend_data:
