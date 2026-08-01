@@ -13,6 +13,12 @@ export interface ParsedBullet {
   linkTitle: string | null;
 }
 
+// Matches a bare French date fragment and nothing else (e.g. "1er janvier",
+// "8 mai", "30 septembre 2020", "Décembre") -- used to drop parent list
+// items that carry no content of their own, see parseBulletLine below.
+const BARE_DATE_RE =
+  /^(?:\d{1,2}(?:er)?\s+)?(?:janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)(?:\s+\d{3,4})?$/i;
+
 /**
  * Returns the raw wikitext of the first matching level-2 section
  * (`== Heading ==`), up to (not including) the next level-2 heading.
@@ -110,6 +116,15 @@ export function parseBulletLine(rawLine: string): ParsedBullet | null {
   }
 
   if (!text) return null;
+
+  // A bullet that's just a date and nothing else -- e.g. a parent list
+  // item "* [[1er janvier]] :" whose actual events live entirely in
+  // nested "**" sub-bullets below it -- carries no real information on
+  // its own. Drop it instead of surfacing a near-empty headline like
+  // "1er janvier". Genuine short sentences ("Un événement.") don't match
+  // this date-only pattern and survive.
+  text = text.replace(/:\s*$/, "").trim();
+  if (BARE_DATE_RE.test(text)) return null;
 
   return { text, linkTitle };
 }

@@ -126,6 +126,82 @@ describe("parseBulletLine", () => {
     expect(result?.linkTitle).toBe("Napoléon Ier");
     expect(result?.text).toBe("Napoléon devient empereur.");
   });
+
+  it("drops a parent bullet that is only a date with nothing else (real events are in nested sub-bullets)", () => {
+    // Regression test from real usage: recent years structure "1er janvier"
+    // as a parent bullet with a bare colon, followed by "**" sub-bullets
+    // for each actual event of that day.
+    expect(parseBulletLine("* [[1er janvier]] :")).toBeNull();
+    expect(parseBulletLine("* [[8 mai]] :")).toBeNull();
+  });
+
+  it("keeps a genuinely short event even though it's only a few words", () => {
+    const result = parseBulletLine("* Bataille de Hastings.");
+    expect(result?.text).toBe("Bataille de Hastings.");
+  });
+});
+
+describe("real-world recent-year structure (Chronologie mensuelle)", () => {
+  // Regression test: recent/heavily-edited French Wikipedia year pages
+  // (reported from real usage on "2020") keep only a handful of vague
+  // bullets directly under "== Événements ==" and move all the actual
+  // dated events into a separate "== Chronologie mensuelle ==" section,
+  // broken down by "=== Mois AAAA ===" sub-sections. Missing this section
+  // entirely made recent years look almost empty.
+  const RECENT_YEAR_PAGE = `{{Infobox Année}}
+'''2020''' est une année.
+
+== Événements ==
+* Poursuite de la [[pandémie de Covid-19]].
+* En 2020, la Métropole de Lille est capitale mondiale du design.
+
+== Chronologie mensuelle ==
+=== Janvier 2020 ===
+Article détaillé : [[Janvier 2020]].
+
+* [[1er janvier]] :
+   ** La [[Croatie]] prend la présidence tournante du [[Conseil de l'Union européenne]].
+   ** Des foules de manifestants pénètrent dans l'enceinte de l'ambassade des États-Unis à Bagdad.
+* 3 janvier : le général iranien [[Qassem Soleimani]] est assassiné en Irak par une frappe américaine.
+
+=== Février 2020 ===
+Article détaillé : [[Février 2020]].
+
+* 9 février : élections législatives en Irlande.
+
+== Événements annulés ==
+* Le sommet du G7 n'aura finalement jamais lieu.
+
+== Naissances en 2020 ==
+* Une personne.
+`;
+
+  it("extractSection finds the monthly chronology section separately from Événements", () => {
+    const section = extractSection(RECENT_YEAR_PAGE, ["Chronologie mensuelle"]);
+    expect(section).toContain("Soleimani");
+    expect(section).toContain("Croatie");
+    expect(section).not.toContain("pandémie");
+    expect(section).not.toContain("Événements annulés");
+  });
+
+  it("combining Événements + Chronologie mensuelle yields the full real event list", () => {
+    const events = extractSection(RECENT_YEAR_PAGE, ["Événements"]);
+    const monthly = extractSection(RECENT_YEAR_PAGE, ["Chronologie mensuelle"]);
+    const bullets = parseBulletLines([events, monthly].filter((s): s is string => !!s).join("\n"));
+
+    const texts = bullets.map((b) => b.text);
+    expect(texts).toContain("Poursuite de la pandémie de Covid-19.");
+    // the bare "* [[1er janvier]] :" parent bullet is dropped...
+    expect(texts.some((t) => t === "1er janvier")).toBe(false);
+    // ...but its real nested events survive, without a stray leading colon
+    expect(texts.some((t) => t.startsWith("La Croatie prend la présidence"))).toBe(true);
+    expect(texts.some((t) => t.startsWith("Des foules de manifestants"))).toBe(true);
+    expect(texts.some((t) => t.includes("Soleimani"))).toBe(true);
+    expect(texts.some((t) => t.includes("Irlande"))).toBe(true);
+    for (const t of texts) {
+      expect(t.startsWith(":")).toBe(false);
+    }
+  });
 });
 
 describe("parseBulletLines", () => {

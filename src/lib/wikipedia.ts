@@ -15,6 +15,11 @@ const USER_AGENT = "TimeDateApp/0.1 (educational/personal project)";
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h -- historical content barely changes
 
 const HISTORICAL_SECTION_NAMES = ["Événements"];
+// Recent/heavily-edited years (roughly the last couple of decades) keep
+// only a handful of vague top-level bullets directly under "Événements"
+// and move all the actual dated events into a separate month-by-month
+// section instead -- without this, recent years look almost empty.
+const MONTHLY_CHRONOLOGY_SECTION_NAMES = ["Chronologie mensuelle"];
 const FUTURE_SECTION_NAMES = [
   "Événements prévus",
   "Événements à venir",
@@ -73,8 +78,9 @@ export async function getYearEvents(year: number): Promise<ParsedBullet[]> {
 
   if (wikitext) {
     const historical = extractSection(wikitext, HISTORICAL_SECTION_NAMES);
+    const monthly = extractSection(wikitext, MONTHLY_CHRONOLOGY_SECTION_NAMES);
     const future = extractSection(wikitext, FUTURE_SECTION_NAMES);
-    const combined = [historical, future].filter((s): s is string => !!s).join("\n");
+    const combined = [historical, monthly, future].filter((s): s is string => !!s).join("\n");
     bullets = combined ? parseBulletLines(combined) : [];
   }
 
