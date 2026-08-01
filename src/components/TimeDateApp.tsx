@@ -10,6 +10,9 @@ export default function TimeDateApp() {
   // ssr:false dynamic import), so it's safe to seed state with the real
   // clock immediately -- there is no server-rendered markup to mismatch.
   const [now, setNow] = useState<Date>(() => new Date());
+  // When set, overrides the live clock so anyone can explore any HH:MM ->
+  // any year, instead of waiting for the real time to land on one.
+  const [manualTime, setManualTime] = useState<{ hour: number; minute: number } | null>(null);
   const [data, setData] = useState<EventApiResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -18,12 +21,12 @@ export default function TimeDateApp() {
     return () => clearInterval(id);
   }, []);
 
-  const hour = now.getHours();
-  const minute = now.getMinutes();
+  const hour = manualTime?.hour ?? now.getHours();
+  const minute = manualTime?.minute ?? now.getMinutes();
   const key = `${hour}:${minute}`;
   // Derived, not stored: true only before the very first fetch settles.
-  // Later minute-to-minute refetches just swap `data` in place once ready,
-  // instead of flashing a loading state every 60 seconds.
+  // Later refetches just swap `data` in place once ready, instead of
+  // flashing a loading state every time the time changes.
   const loading = data === null && error === null;
 
   useEffect(() => {
@@ -59,6 +62,29 @@ export default function TimeDateApp() {
           {formatHHMM({ hour, minute })}
         </p>
         <p className="mt-2 text-sm text-white/50">soit l&apos;an {hourMinuteToYear({ hour, minute })}</p>
+
+        <div className="mt-4 flex items-center justify-center gap-3 text-sm text-white/50">
+          <label className="flex items-center gap-2">
+            <span>Explorer une autre heure :</span>
+            <input
+              type="time"
+              value={`${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`}
+              onChange={(e) => {
+                const [h, m] = e.target.value.split(":").map(Number);
+                if (!Number.isNaN(h) && !Number.isNaN(m)) setManualTime({ hour: h, minute: m });
+              }}
+              className="rounded border border-white/20 bg-transparent px-2 py-1 text-white [color-scheme:dark]"
+            />
+          </label>
+          {manualTime && (
+            <button
+              onClick={() => setManualTime(null)}
+              className="underline decoration-white/40 underline-offset-4 hover:text-white"
+            >
+              Revenir à maintenant
+            </button>
+          )}
+        </div>
       </div>
 
       <EventCard data={data} loading={loading} error={error} />
