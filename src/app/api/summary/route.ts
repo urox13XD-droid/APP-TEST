@@ -17,6 +17,9 @@ export async function GET(request: NextRequest) {
   };
 
   return NextResponse.json(body, {
-    headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=3600" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "public, max-age=300, stale-while-revalidate=3600",
+    },
   });
 }
