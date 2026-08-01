@@ -1,9 +1,0 @@
-"use client";
-
-import dynamic from "next/dynamic";
-
-const Studio = dynamic(() => import("@/components/Studio"), { ssr: false });
-
-export default function Home() {
-  return <Studio />;
-}
