@@ -72,6 +72,25 @@ describe("parseBulletLine", () => {
     expect(result?.text).toBe("1er janvier : nouvelle année.");
   });
 
+  it("drops a leading bare colon left behind by an unrecognised date template", () => {
+    // Simulates a date-link template name we don't specifically unwrap
+    // (Wikipedia uses several across different years/pages) getting
+    // deleted by the generic template stripper, leaving ": rest of
+    // sentence" -- this is the actual bug reported from real usage.
+    const result = parseBulletLine("* {{Date sd|29|1|1713}} : Second traité de la Barrière à Utrecht.");
+    expect(result?.text).toBe("Second traité de la Barrière à Utrecht.");
+  });
+
+  it("capitalises the first letter even when there was no leading colon", () => {
+    const result = parseBulletLine("* le général Laperrine quitte Ouargla en automobile.");
+    expect(result?.text).toBe("Le général Laperrine quitte Ouargla en automobile.");
+  });
+
+  it("leaves a digit-first sentence (e.g. a date) untouched by capitalisation", () => {
+    const result = parseBulletLine("* [[8 mai]] : capitulation de l'Allemagne.");
+    expect(result?.text).toBe("8 mai : capitulation de l'Allemagne.");
+  });
+
   it("strips <ref>...</ref> footnotes entirely", () => {
     const result = parseBulletLine("* Fin de la guerre<ref>Une source quelconque.</ref>.");
     expect(result?.text).toBe("Fin de la guerre.");

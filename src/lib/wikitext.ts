@@ -96,6 +96,19 @@ export function parseBulletLine(rawLine: string): ParsedBullet | null {
   text = text.replace(/'''''/g, "").replace(/'''/g, "").replace(/''/g, "");
 
   text = text.replace(/\s+/g, " ").trim();
+
+  // Wikipedia uses several different date-link template names across
+  // years/pages -- we can't reliably chase every variant. When one we
+  // don't recognise gets deleted by the generic template stripper above,
+  // it leaves the bullet's own ": rest of the sentence" separator with
+  // nothing in front of it. Clean that up defensively (whatever the
+  // cause) and always capitalise the first letter, so the headline
+  // reads as a proper sentence either way.
+  text = text.replace(/^:+\s*/, "");
+  if (text.length > 0) {
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
   if (!text) return null;
 
   return { text, linkTitle };
