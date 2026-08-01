@@ -22,12 +22,12 @@ interface Props {
 }
 
 export default function EventCard({ data, loading, error }: Props) {
+  const event = data?.event ?? null;
+
   const [expanded, setExpanded] = useState(false);
   const [summary, setSummary] = useState<SummaryApiResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
-
-  const event = data?.event ?? null;
 
   async function handleToggle() {
     if (!event) return;
@@ -88,7 +88,9 @@ export default function EventCard({ data, loading, error }: Props) {
           {SOURCE_LABEL[event.source] ?? event.source}
           {event.fictionWork ? ` · ${event.fictionWork}` : ""}
         </span>
-        <p className="mt-2 text-base leading-snug text-white/90">{event.headline}</p>
+        <p className={`mt-2 text-base leading-snug text-white/90 ${expanded ? "" : "line-clamp-1"}`}>
+          {event.headline}
+        </p>
         <p className="mt-2 text-xs text-white/40">{expanded ? "Toucher pour réduire ▲" : "Toucher pour en savoir plus ▼"}</p>
       </button>
 

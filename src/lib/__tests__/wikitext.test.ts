@@ -54,6 +54,24 @@ describe("parseBulletLine", () => {
     expect(result?.linkTitle).toBe("8 mai");
   });
 
+  it("unwraps a {{Date-|...}} template to its date text instead of deleting it", () => {
+    // Regression test: real French Wikipedia year pages date-link events
+    // with this template rather than a plain [[wikilink]]. Deleting it
+    // like a noise template left bullets starting mid-sentence (": ...").
+    const result = parseBulletLine(
+      "** {{Date-|30 septembre}} : élections législatives danoises. Le 30, [[Hans Hedtoft]] forme un gouvernement social-démocrate minoritaire."
+    );
+    expect(result?.text).toBe(
+      "30 septembre : élections législatives danoises. Le 30, Hans Hedtoft forme un gouvernement social-démocrate minoritaire."
+    );
+    expect(result?.text.startsWith(":")).toBe(false);
+  });
+
+  it("unwraps {{date-|...}} regardless of capitalisation", () => {
+    const result = parseBulletLine("* {{date-|1er janvier}} : nouvelle année.");
+    expect(result?.text).toBe("1er janvier : nouvelle année.");
+  });
+
   it("strips <ref>...</ref> footnotes entirely", () => {
     const result = parseBulletLine("* Fin de la guerre<ref>Une source quelconque.</ref>.");
     expect(result?.text).toBe("Fin de la guerre.");

@@ -87,7 +87,16 @@ export default function TimeDateApp() {
         </div>
       </div>
 
-      <EventCard data={data} loading={loading} error={error} />
+      {/* Remounts EventCard whenever the underlying event changes, so its
+          expanded/summary state always starts fresh instead of showing a
+          stale summary from a previously-picked time (React's recommended
+          pattern for "reset state when a prop changes"). */}
+      <EventCard
+        key={data ? `${data.year}|${data.event?.wikiTitle ?? data.event?.headline ?? "none"}` : "none"}
+        data={data}
+        loading={loading}
+        error={error}
+      />
     </main>
   );
 }

@@ -45,6 +45,16 @@ export function extractSection(wikitext: string, sectionNames: string[]): string
   return captured.length ? captured.join("\n") : null;
 }
 
+// French Wikipedia year pages commonly date-link the start of an event
+// bullet with a template instead of a plain [[wikilink]], e.g.
+// "{{Date-|30 septembre}} : élections..." -- unwrap these to their date
+// text *before* the generic template stripper runs, otherwise the date
+// itself gets deleted along with genuine noise templates (citation-needed
+// markers, etc.), leaving a bullet that starts mid-sentence with ": ...".
+function unwrapDateTemplates(text: string): string {
+  return text.replace(/\{\{\s*[Dd]ate2?-?\s*\|([^{}|]+)(?:\|[^{}]*)?\}\}/g, (_m, param: string) => param.trim());
+}
+
 function stripTemplates(text: string): string {
   // {{...}} can nest in real wikitext, but not in the short event bullets
   // we deal with here -- loop a non-nested pass until stable, as cheap
@@ -79,6 +89,7 @@ export function parseBulletLine(rawLine: string): ParsedBullet | null {
   text = text.replace(/\[https?:\/\/[^\s\]]+\s+([^\]]+)\]/g, "$1");
   text = text.replace(/\[https?:\/\/[^\s\]]+\]/g, "");
 
+  text = unwrapDateTemplates(text);
   text = stripTemplates(text);
 
   // Bold/italic markup
