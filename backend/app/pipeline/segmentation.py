@@ -1,13 +1,25 @@
 """Object/foreground detection.
 
-Segmentation is behind a small `Segmenter` interface so the default,
-dependency-free OpenCV backend can be swapped for Meta's Segment Anything 2
-simply by installing the optional `sam2` extra and setting
-`ONELINE_SEGMENTER=sam2` + `ONELINE_SAM2_CHECKPOINT=/path/to/ckpt`.
+Segmentation is behind a small `Segmenter` interface with three backends:
 
-SAM2 needs a downloaded checkpoint (hundreds of MB) and, for reasonable
-speed, a GPU -- neither is available in every deployment, so it is wired up
-as an optional adapter rather than a hard dependency.
+- `OpenCVSegmenter` (default): pure classic-CV thresholding + connected
+  components. Zero extra dependencies, but it has no notion of "subject" --
+  on a busy photo/illustration it just latches onto whichever region has
+  the strongest local contrast (which can be a background detail, not the
+  subject you actually want).
+- `RembgSegmenter` (`ONELINE_SEGMENTER=rembg`): a lightweight U^2-Net-based
+  background-removal model (via the `rembg` package). Runs fine on CPU, has
+  no GPU requirement, and auto-downloads its ~176MB model on first use.
+  This is the recommended backend for photos/character art/portraits --
+  it isolates the actual subject instead of an arbitrary high-contrast
+  region.
+- `SAM2Segmenter` (`ONELINE_SEGMENTER=sam2`): Meta's Segment Anything 2,
+  for the best multi-object detection quality. Needs a downloaded
+  checkpoint (hundreds of MB) and, for reasonable speed, a GPU.
+
+Both `rembg` and `sam2` are optional extras -- if the package/checkpoint
+isn't available, `get_segmenter` logs a warning and falls back to
+`OpenCVSegmenter` rather than failing the request.
 """
 from __future__ import annotations
 
@@ -77,6 +89,58 @@ class OpenCVSegmenter(Segmenter):
         return masks
 
 
+class RembgSegmenter(Segmenter):
+    """Subject-aware foreground extraction via `rembg` (U^2-Net). Unlike
+    `OpenCVSegmenter`, this actually recognises "there is a subject here"
+    instead of just reacting to local contrast, so it correctly isolates a
+    character/animal/object on a busy background (photos, illustrations)
+    instead of latching onto an unrelated high-contrast region.
+    """
+
+    def __init__(self, model_name: str = "u2net"):
+        try:
+            from rembg import new_session, remove  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "rembg backend requested but the `rembg` package is not installed. "
+                "Install it with `pip install rembg onnxruntime`, "
+                "or set ONELINE_SEGMENTER=opencv to use the built-in fallback."
+            ) from exc
+        self._remove = remove
+        # Builds/download the ONNX model on first use (~176MB, cached under
+        # ~/.u2net afterwards) -- kept lazy so importing this module never
+        # triggers a network call.
+        self._session = new_session(model_name)
+
+    def segment(self, image_bgr: np.ndarray, max_objects: int = 12) -> list[np.ndarray]:
+        from PIL import Image
+
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        cutout = self._remove(Image.fromarray(image_rgb), session=self._session)
+        alpha = np.array(cutout)[:, :, 3]
+        _, mask = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        # Usually one coherent subject, but split into parts if the cutout
+        # left disjoint blobs (e.g. two separate objects in frame).
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        min_area = mask.size * 0.0008
+        components = [
+            (i, stats[i, cv2.CC_STAT_AREA])
+            for i in range(1, num_labels)
+            if stats[i, cv2.CC_STAT_AREA] >= min_area
+        ]
+        components.sort(key=lambda t: t[1], reverse=True)
+        components = components[:max_objects]
+
+        masks = [np.where(labels == label_id, 255, 0).astype(np.uint8) for label_id, _ in components]
+        if not masks:
+            masks = [np.full(image_bgr.shape[:2], 255, dtype=np.uint8)]
+        return masks
+
+
 class SAM2Segmenter(Segmenter):
     """Adapter around Meta's Segment Anything 2 automatic mask generator.
 
@@ -113,11 +177,31 @@ class SAM2Segmenter(Segmenter):
         return masks
 
 
+_segmenter_cache: dict[str, Segmenter] = {}
+
+
 def get_segmenter(backend: str, checkpoint: str = "", model_cfg: str = "") -> Segmenter:
+    """Instantiates (and caches) the requested segmenter. Caching matters
+    here specifically because rembg/SAM2 load a model file -- without it,
+    every single upload would reload the model from disk."""
+    cache_key = f"{backend}:{checkpoint}:{model_cfg}"
+    if cache_key in _segmenter_cache:
+        return _segmenter_cache[cache_key]
+
     if backend == "sam2":
         try:
-            return SAM2Segmenter(checkpoint, model_cfg)
+            segmenter: Segmenter = SAM2Segmenter(checkpoint, model_cfg)
         except RuntimeError as exc:
             logger.warning("Falling back to OpenCV segmenter: %s", exc)
-            return OpenCVSegmenter()
-    return OpenCVSegmenter()
+            segmenter = OpenCVSegmenter()
+    elif backend == "rembg":
+        try:
+            segmenter = RembgSegmenter()
+        except RuntimeError as exc:
+            logger.warning("Falling back to OpenCV segmenter: %s", exc)
+            segmenter = OpenCVSegmenter()
+    else:
+        segmenter = OpenCVSegmenter()
+
+    _segmenter_cache[cache_key] = segmenter
+    return segmenter

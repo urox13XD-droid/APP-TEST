@@ -15,8 +15,12 @@ EXPORT_DIR = DATA_DIR / "exports"
 for d in (UPLOAD_DIR, SESSION_DIR, EXPORT_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# Segmentation backend: "opencv" (default, always available) or "sam2"
-# (requires the optional `sam2` package + downloaded checkpoint).
+# Segmentation backend: "opencv" (default, always available, but only
+# reacts to local contrast -- weak on busy photos/illustrations),
+# "rembg" (recommended for photos/character art: subject-aware, CPU-only,
+# requires `pip install rembg onnxruntime`), or "sam2" (best quality,
+# requires the optional `sam2` package + downloaded checkpoint + ideally a
+# GPU).
 SEGMENTER_BACKEND = os.getenv("ONELINE_SEGMENTER", "opencv")
 SAM2_CHECKPOINT = os.getenv("ONELINE_SAM2_CHECKPOINT", "")
 SAM2_MODEL_CFG = os.getenv("ONELINE_SAM2_MODEL_CFG", "")

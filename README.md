@@ -155,11 +155,33 @@ Full interactive docs at `/docs` (OpenAPI). Key endpoints:
 - `GET /api/session/{session_id}/export/{svg|dxf|stl|obj}`
 - `GET /api/session/{session_id}/image` — original uploaded image (used as the editor background)
 
-## Enabling Segment Anything 2 (optional)
+## Choosing a segmentation backend
 
-The default OpenCV segmenter needs no setup and works well on line art,
-logos, scanned drawings and reasonably clean photos. For messier photos,
-Meta's SAM2 gives noticeably better subject/object masks. To enable it:
+The default `opencv` segmenter needs no setup and works well on clean line
+art, logos and scanned drawings. It has no notion of "subject" though — on
+a busy photo or illustration it just reacts to local contrast, which can
+latch onto an irrelevant background detail instead of the character/object
+you actually wanted. Two better options:
+
+### `rembg` (recommended for photos/character art, CPU-only)
+
+A lightweight U^2-Net background-removal model. Actually recognises "there
+is a subject here", isolates it, and needs no GPU — the ~176MB model
+auto-downloads on first use.
+
+```bash
+pip install rembg onnxruntime
+export ONELINE_SEGMENTER=rembg
+```
+
+Note this still produces a **silhouette/outline** of the subject (its
+outer boundary + any holes), not a fully-detailed sketch with internal
+lines (face, clothing folds, etc.) — tracing internal detail lines would be
+a separate future feature.
+
+### `sam2` (best quality, needs a GPU)
+
+Meta's Segment Anything 2 gives the best multi-object detection quality.
 
 ```bash
 pip install sam2  # + follow its instructions to download a checkpoint
@@ -169,8 +191,9 @@ export ONELINE_SAM2_MODEL_CFG=sam2_hiera_l.yaml
 ```
 
 SAM2 needs a GPU for reasonable latency and a multi-hundred-MB checkpoint
-download, so it's kept optional; if the package/checkpoint isn't available
-the backend logs a warning and transparently falls back to OpenCV.
+download, so it's kept optional. For both `rembg` and `sam2`: if the
+package/checkpoint isn't available, the backend logs a warning and
+transparently falls back to `opencv` rather than failing the request.
 
 ## Known limitations / honest scope notes
 
