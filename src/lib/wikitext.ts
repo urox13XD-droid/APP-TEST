@@ -51,6 +51,86 @@ export function extractSection(wikitext: string, sectionNames: string[]): string
   return captured.length ? captured.join("\n") : null;
 }
 
+/** Splits wikitext into top-level (`==`) sections, each carrying all of
+ * its nested (`===`, `====`, ...) subsection text as-is. Level-3+
+ * headings are matched by `parseBulletLines`'s "not a bullet" filter and
+ * simply flow through as inert text -- only the level-2 boundary matters
+ * here. */
+function parseTopLevelSections(wikitext: string): { title: string; content: string }[] {
+  const lines = wikitext.split("\n");
+  const sections: { title: string; content: string[] }[] = [];
+  let current: { title: string; content: string[] } | null = null;
+
+  for (const line of lines) {
+    const heading = line.match(/^==([^=].*?)==\s*$/);
+    if (heading) {
+      if (current) sections.push(current);
+      current = { title: heading[1].trim(), content: [] };
+      continue;
+    }
+    if (current) current.content.push(line);
+    // Lines before the first level-2 heading (lede/infobox) are discarded.
+  }
+  if (current) sections.push(current);
+
+  return sections.map((s) => ({ title: s.title, content: s.content.join("\n") }));
+}
+
+// Section titles that never contain "events that happened" in the sense
+// this app cares about. Matched as a prefix (case-insensitive, accents
+// normalised) so "Décès en 2020" / "Décès" / "Fondations en 2020" etc. all
+// match without having to enumerate every year. An allowlist of exact
+// section names ("Événements", "Chronologie mensuelle", ...) turned out to
+// be too brittle -- French Wikipedia doesn't use identical section names
+// on every year page, so real events kept getting missed. Blocking the
+// small set of sections we *know* aren't events is far more robust.
+const EXCLUDED_SECTION_PREFIXES = [
+  "naissance",
+  "deces", // "décès", diacritic-stripped, see normalise()
+  "distinction",
+  "prix nobel",
+  "autres prix",
+  "fondation",
+  "note",
+  "reference",
+  "bibliographie",
+  "article connexe",
+  "voir aussi",
+  "lien externe",
+  "annexe",
+  "source",
+  "chronologie specifique a la fiction", // handled separately as a fiction source, not historical fact
+  "evenements annule", // "Événements annulés" -- never actually happened
+];
+
+function normalise(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "") // strip combining accent marks
+    .toLowerCase()
+    .trim();
+}
+
+function isExcludedSection(title: string): boolean {
+  const normalised = normalise(title);
+  return EXCLUDED_SECTION_PREFIXES.some((prefix) => normalised.startsWith(prefix));
+}
+
+/** The main extraction entry point: every bullet from every section of
+ * the page except the known non-event ones (see EXCLUDED_SECTION_PREFIXES
+ * above), in document order. Replaces trying to guess exact section names
+ * ("Événements", "Chronologie mensuelle", "Événements prévus", ...) --
+ * this only needs to know what to skip, not what to look for. */
+export function extractEventBullets(wikitext: string): ParsedBullet[] {
+  const sections = parseTopLevelSections(wikitext);
+  const bullets: ParsedBullet[] = [];
+  for (const section of sections) {
+    if (isExcludedSection(section.title)) continue;
+    bullets.push(...parseBulletLines(section.content));
+  }
+  return bullets;
+}
+
 // French Wikipedia year pages commonly date-link the start of an event
 // bullet with a template instead of a plain [[wikilink]], e.g.
 // "{{Date-|30 septembre}} : élections..." -- unwrap these to their date

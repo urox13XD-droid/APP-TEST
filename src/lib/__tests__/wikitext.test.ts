@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractSection, parseBulletLine, parseBulletLines } from "../wikitext";
+import { extractEventBullets, extractSection, parseBulletLine, parseBulletLines } from "../wikitext";
 
 const SAMPLE_PAGE = `{{Infobox Année}}
 '''1945''' est une année commune.
@@ -201,6 +201,80 @@ Article détaillé : [[Février 2020]].
     for (const t of texts) {
       expect(t.startsWith(":")).toBe(false);
     }
+  });
+});
+
+describe("extractEventBullets", () => {
+  // A blocklist ("skip Naissances/Décès/...") is far more robust than an
+  // allowlist of exact section names, since French Wikipedia doesn't use
+  // identical section names on every year page. This is the full-page
+  // version of the "real-world recent-year structure" test above, using
+  // extractEventBullets directly instead of manually combining sections.
+  const FULL_YEAR_PAGE = `{{Infobox Année}}
+'''2020''' est une année.
+
+== Événements ==
+* Poursuite de la [[pandémie de Covid-19]].
+
+== Chronologie mensuelle ==
+=== Janvier 2020 ===
+Article détaillé : [[Janvier 2020]].
+
+* [[1er janvier]] :
+   ** La [[Croatie]] prend la présidence tournante du Conseil de l'Union européenne.
+* 3 janvier : le général iranien [[Qassem Soleimani]] est assassiné en Irak.
+
+== Événements annulés ==
+* Le sommet du G7 n'aura finalement jamais lieu.
+
+== Distinctions internationales ==
+=== Prix Nobel ===
+* Prix Nobel de la paix : Programme alimentaire mondial.
+
+== Fondations en 2020 ==
+* Une entreprise.
+
+== Naissances en 2020 ==
+* Une personne née cette année-là.
+
+== Décès en 2020 ==
+[[Sean Connery]].
+=== Janvier ===
+* 31 janvier : Mary Higgins Clark, écrivaine américaine.
+
+== Voir aussi ==
+* [[Années 2020]]
+
+== Notes et références ==
+1. Une note.
+`;
+
+  it("includes real events from both Événements and Chronologie mensuelle", () => {
+    const texts = extractEventBullets(FULL_YEAR_PAGE).map((b) => b.text);
+    expect(texts.some((t) => t.includes("pandémie de Covid-19"))).toBe(true);
+    expect(texts.some((t) => t.includes("Croatie"))).toBe(true);
+    expect(texts.some((t) => t.includes("Soleimani"))).toBe(true);
+  });
+
+  it("excludes Naissances, Décès, Fondations, Distinctions/Prix Nobel, Voir aussi, Notes, Événements annulés", () => {
+    const texts = extractEventBullets(FULL_YEAR_PAGE).map((b) => b.text);
+    expect(texts.some((t) => t.includes("née cette année"))).toBe(false);
+    expect(texts.some((t) => t.includes("Higgins Clark"))).toBe(false);
+    expect(texts.some((t) => t.includes("Une entreprise"))).toBe(false);
+    expect(texts.some((t) => t.includes("Programme alimentaire"))).toBe(false);
+    expect(texts.some((t) => t.includes("Années 2020"))).toBe(false);
+    expect(texts.some((t) => t.includes("G7"))).toBe(false);
+  });
+
+  it("matches excluded section prefixes regardless of accents/case (Décès vs DECES vs décès en 2020)", () => {
+    const page = `== Événements ==\n* Un vrai événement.\n\n== DÉCÈS EN 2020 ==\n* Ne devrait jamais apparaître.\n`;
+    const texts = extractEventBullets(page).map((b) => b.text);
+    expect(texts).toEqual(["Un vrai événement."]);
+  });
+
+  it("returns an empty array for a page with no recognisable event section", () => {
+    const page = `== Naissances ==\n* Une personne.\n\n== Décès ==\n* Une autre.\n`;
+    expect(extractEventBullets(page)).toEqual([]);
   });
 });
 
