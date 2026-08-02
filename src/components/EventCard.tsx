@@ -21,6 +21,11 @@ interface Props {
   error: string | null;
 }
 
+function summaryUrl(title: string, headline: string, year: number): string {
+  const params = new URLSearchParams({ title, headline, year: String(year) });
+  return `/api/summary?${params}`;
+}
+
 export default function EventCard({ data, loading, error }: Props) {
   const event = data?.event ?? null;
 
@@ -30,7 +35,7 @@ export default function EventCard({ data, loading, error }: Props) {
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
   async function handleToggle() {
-    if (!event) return;
+    if (!event || !data) return;
     const next = !expanded;
     setExpanded(next);
     if (next && !summary && !summaryLoading) {
@@ -41,7 +46,7 @@ export default function EventCard({ data, loading, error }: Props) {
       setSummaryLoading(true);
       setSummaryError(null);
       try {
-        const res = await fetch(`/api/summary?title=${encodeURIComponent(event.wikiTitle)}`);
+        const res = await fetch(summaryUrl(event.wikiTitle, event.headline, data.year));
         if (!res.ok) throw new Error("Échec de la récupération du résumé.");
         setSummary(await res.json());
       } catch {
@@ -101,6 +106,11 @@ export default function EventCard({ data, loading, error }: Props) {
           {summary && (
             <>
               <p className="leading-relaxed">{summary.extract}</p>
+              {!summary.aiGenerated && (
+                <p className="mt-2 text-[11px] text-white/30">
+                  Résumé Wikipédia (résumé assisté indisponible pour le moment).
+                </p>
+              )}
               <a
                 href={summary.wikipediaUrl}
                 target="_blank"

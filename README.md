@@ -12,8 +12,10 @@ jeux vidéo).
 - `20h49` → l'an 2049 → *Blade Runner 2049* se déroule cette année-là
 - `23h59` → l'an 2359, la valeur la plus haute possible
 
-Toucher l'anecdote affiche un court résumé (extrait Wikipédia), avec un
-lien vers l'article complet en bas si on veut aller plus loin.
+Toucher l'anecdote affiche un court résumé rédigé par l'app à partir de
+l'anecdote (via l'API Claude, quand une clé est configurée -- sinon
+l'extrait brut de Wikipédia en repli), avec un lien vers l'article complet
+en bas si on veut aller plus loin.
 
 ## Architecture
 
@@ -75,7 +77,7 @@ Ouvrir [http://localhost:3000](http://localhost:3000).
 npm test
 ```
 
-37 tests couvrant la logique pure (mapping heure→année, rotation
+52 tests couvrant la logique pure (mapping heure→année, rotation
 quotidienne, parsing du wikitexte sur des exemples réalistes, combinaison
 des sources historique/prévision/fiction) -- tout sauf les vrais appels
 réseau à Wikipédia, qui ne peuvent pas être exécutés depuis l'environnement
@@ -84,6 +86,24 @@ vérifier une fois en local que les vraies anecdotes Wikipédia s'affichent
 bien (par ex. régler l'heure de ton ordinateur, ou attendre une heure comme
 `19h45`) -- **si le parsing d'une page Wikipédia particulière semble
 buggé, dis-le-moi et je corrige `lib/wikitext.ts`.**
+
+## Résumé généré par IA
+
+Le résumé affiché au clic (`lib/aiSummary.ts`, appelé depuis
+`api/summary/route.ts`) est rédigé par Claude à partir du titre exact de
+l'anecdote (pas de l'article Wikipédia lié, qui parle parfois d'un sujet
+connexe plutôt que de l'événement précis) -- c'est ce qui règle le
+problème "le lien ne parle pas de la date affichée".
+
+Pour l'activer en production sur Vercel :
+
+1. Créer une clé sur [console.anthropic.com](https://console.anthropic.com)
+2. Vercel → Project → Settings → Environment Variables → ajouter
+   `ANTHROPIC_API_KEY` avec cette valeur → redéployer
+
+Sans clé configurée, l'app continue de fonctionner normalement et retombe
+sur l'extrait brut de Wikipédia (avec une petite mention discrète en
+dessous du résumé pour le signaler).
 
 ## Installer comme app sur iPhone / Android (PWA)
 

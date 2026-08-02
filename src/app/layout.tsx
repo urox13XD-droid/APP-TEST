@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import AynilBadge from "@/components/AynilBadge";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -38,7 +39,10 @@ export default function RootLayout({
       lang="fr"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        <AynilBadge />
+      </body>
     </html>
   );
 }
