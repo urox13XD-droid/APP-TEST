@@ -155,6 +155,7 @@
   const RATE = 32000;                   // stéréo 32 kHz : restitue tout jusqu'à 16 kHz (oiseaux, insectes)
   const XFADE = 4;                      // fondu enchaîné de la boucle d'ambiance (s)
   const FADE_IN = 15;                   // montée progressive de l'ambiance (s)
+  const GONG_IN = 5;                    // montée douce des gongs au début de la séance (s)
   const GONG_LOOP = 60;                 // sans ambiance : boucle d'environ 1 min de cycles
 
   const $ = (id) => document.getElementById(id);
@@ -187,7 +188,7 @@
   // (taille fixe quelle que soit la durée, donc stéréo possible même pour 1 h) et la page
   // compte le temps écoulé pour arrêter la séance.
   // Un seul lecteur audio : c'est ce qui permet à iOS de continuer en arrière-plan.
-  // fade : { from } = instant (temps de séance) où l'ambiance commence sa montée, ou null.
+  // fade : { from, amb, gong } = instant (temps de séance) où commence la montée, et ce qui monte ; ou null.
   function buildLoop(s, gong, amb, fade) {
     const cycle = s.i + s.e, cyc = cycle * RATE;
     const f = XFADE * RATE;
@@ -200,10 +201,10 @@
 
     if (amb && s.va > 0) {
       const g0 = s.va / 100, [aL, aR] = amb, N = aL.length;
-      const F = FADE_IN * RATE, from = fade ? Math.round((fade.from % (U / RATE)) * RATE) : 0;
+      const F = FADE_IN * RATE, from = fade ? Math.round((fade.from % (U / RATE)) * RATE) : 0, ramp = fade && fade.amb;
       for (let n = 0; n < U; n++) {
         let l, r, g = g0;
-        if (fade) {                                  // crescendo doux (courbe en S) à partir de « from »
+        if (ramp) {                                  // crescendo doux (courbe en S) à partir de « from »
           const d = (n - from + U) % U;
           if (d < F) g *= 0.5 - 0.5 * Math.cos(Math.PI * d / F);
           else if (d > U - 10 * RATE) g = 0;         // silence juste avant, au cas où la bascule arrive tôt
@@ -217,9 +218,16 @@
       }
     }
     if (s.vg > 0) {
+      const gRamp = fade && fade.gong, G = GONG_IN * RATE;
+      const gFrom = fade ? Math.round((fade.from % (U / RATE)) * RATE) : 0;
       const g = s.vg / 100;
       const add = ([sL, sR], start) => {
-        for (let n = 0; n < sL.length; n++) { const j = (start + n) % U; put(2 * j, sL[n] * g); put(2 * j + 1, sR[n] * g); }
+        for (let n = 0; n < sL.length; n++) {
+          const j = (start + n) % U;
+          let gg = g;
+          if (gRamp) { const d = (j - gFrom + U) % U; if (d < G) gg *= 0.5 - 0.5 * Math.cos(Math.PI * d / G); }
+          put(2 * j, sL[n] * gg); put(2 * j + 1, sR[n] * gg);
+        }
       };
       for (let c = 0; c < k; c++) { add(gong[0], c * cyc); add(gong[1], c * cyc + s.i * RATE); }
     }
@@ -275,7 +283,7 @@
     cfg.amb = !cfg.amb; store.set(cfg); renderSound();
     if (cfg.amb) loadAmbient().catch(() => {});
     // En cours de séance, l'ambiance arrive aussi en crescendo (départ ~3 s après l'appui).
-    fade = cfg.amb && running && url ? { from: elapsed() + 3 } : null;
+    fade = cfg.amb && running && url ? { from: elapsed() + 3, amb: true, gong: false } : null;
     remix(0);
   };
   $("vol").onclick = () => $("volBg").classList.add("open");
@@ -368,7 +376,7 @@
     session = { ...cfg };
     setRunning(true);
     let built;
-    fade = session.amb ? { from: 0 } : null;
+    fade = { from: 0, amb: session.amb, gong: true };
     try { built = await prepare(session, fade); }
     catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
     if (my !== gen) return;
@@ -400,7 +408,7 @@
   // se rejouerait à chaque tour de boucle).
   let fade = null;
   function fadeDone() {
-    if (fade && elapsed() >= fade.from + FADE_IN + 0.5) { fade = null; remix(0); }
+    if (fade && elapsed() >= fade.from + Math.max(fade.amb ? FADE_IN : 0, fade.gong ? GONG_IN : 0) + 0.5) { fade = null; remix(0); }
   }
 
   function remix(delay) {
@@ -409,7 +417,7 @@
     mixT = setTimeout(async () => {
       const my = ++mixGen, g = gen;
       const stale = () => my !== mixGen || g !== gen || !running;
-      const s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va }, f = s.amb ? fade : null;
+      const s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va }, f = fade && { ...fade, amb: fade.amb && s.amb };
       let built;
       try { built = await prepare(s, f); } catch (err) { if (!stale()) alert("Mise à jour impossible : " + err.message); return; }
       if (stale()) return;
