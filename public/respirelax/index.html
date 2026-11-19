@@ -58,7 +58,16 @@
     color: rgba(233,235,247,.45); white-space: nowrap; transition: color .2s; }
   .picker div.sel { color: var(--text); }
 
-  .cta { margin: 26px 24px 0; width: calc(100% - 48px); height: 60px; border: 0; border-radius: 999px;
+  .extras { width: 100%; display: flex; gap: 14px; padding: 18px 24px 0; }
+  .round { width: 46px; height: 46px; border-radius: 50%; border: 1.5px solid #dfe2f5; background: none;
+    color: var(--text); display: flex; align-items: center; justify-content: center; padding: 0; }
+  .round svg { width: 22px; height: 22px; }
+  .round.on { background: var(--accent); border-color: var(--accent); }
+  .slider-row { padding: 12px 0; font-size: 16px; letter-spacing: .05em; }
+  .slider-row div { display: flex; justify-content: space-between; margin-bottom: 10px; }
+  .slider-row input { width: 100%; accent-color: var(--accent); }
+
+  .cta { margin: 18px 24px 0; width: calc(100% - 48px); height: 60px; border: 0; border-radius: 999px;
     background: var(--accent); color: #fff; font-size: 21px; font-weight: 700; font-family: inherit;
     display: flex; align-items: center; justify-content: center; gap: 22px; }
   .cta svg { width: 22px; height: 22px; }
@@ -98,6 +107,15 @@
     <div class="picker" id="picker"></div>
   </section>
 
+  <div class="extras">
+    <button class="round" id="music" aria-label="Son d'ambiance">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+    </button>
+    <button class="round" id="vol" aria-label="Volumes">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+    </button>
+  </div>
+
   <button class="cta" id="start">
     <span id="startText">Commencer la séance</span>
     <svg id="startIcon" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><path d="M6 3.5v17L20 12z"/></svg>
@@ -115,6 +133,17 @@
   </div>
 </div>
 
+<div class="sheet-bg" id="volBg">
+  <div class="sheet">
+    <h2>VOLUME</h2>
+    <label class="slider-row"><div><span>GONG</span><span id="vgVal"></span></div>
+      <input type="range" id="vg" min="0" max="100" step="5"></label>
+    <label class="slider-row"><div><span>AMBIANCE</span><span id="vaVal"></span></div>
+      <input type="range" id="va" min="0" max="100" step="5"></label>
+    <button class="cta" id="volOk">Valider</button>
+  </div>
+</div>
+
 <audio id="player" playsinline preload="auto"></audio>
 
 <script>
@@ -127,6 +156,8 @@
   const rateFor = (min) => (min <= 20 ? 22050 : 11025);
   const LEAD = 0.6;                     // silence avant la 1re cloche (s)
   const TAIL = 4;                       // laisse sonner la dernière cloche (s)
+  const XFADE = 4;                      // fondu enchaîné de la boucle d'ambiance (s)
+  const AMB_IN = 2;                     // fondu d'entrée de l'ambiance (s)
 
   const $ = (id) => document.getElementById(id);
   const store = {
@@ -138,6 +169,9 @@
     i: clamp(saved.i ?? 7, MIN_S, MAX_S),
     e: clamp(saved.e ?? 7, MIN_S, MAX_S),
     min: DURATIONS.includes(saved.min) ? saved.min : 5,
+    amb: saved.amb === true,
+    vg: clamp(saved.vg ?? 90, 0, 100),   // volume gong (%)
+    va: clamp(saved.va ?? 50, 0, 100),   // volume ambiance (%)
   };
   function clamp(v, a, b) { return Math.min(b, Math.max(a, v | 0)); }
 
@@ -173,29 +207,69 @@
     fetch(`/respirelax/${name}.wav`).then((r) => r.arrayBuffer()).then((b) => { samples[name] = parseWav(b); })
   ));
 
+  // Ambiance : décodée en mono à la fréquence de la séance (un seul décodage par fréquence).
+  let ambBytes = null;
+  const ambDecoded = {};
+  function loadAmbient(rate) {
+    if (!ambDecoded[rate]) {
+      ambBytes = ambBytes || fetch("/respirelax/ambiance.mp3").then((r) => r.arrayBuffer());
+      ambDecoded[rate] = ambBytes.then((b) => new OfflineAudioContext(1, 1, rate).decodeAudioData(b.slice(0)))
+        .then((buf) => {
+          if (buf.numberOfChannels === 1) return buf.getChannelData(0);
+          const a = buf.getChannelData(0), c = buf.getChannelData(1), m = new Float32Array(a.length);
+          for (let k = 0; k < a.length; k++) m[k] = (a[k] + c[k]) / 2;
+          return m;
+        })
+        .catch((e) => { delete ambDecoded[rate]; throw e; });
+    }
+    return ambDecoded[rate];
+  }
+
   // Construit toute la séance dans un seul WAV : c'est ce qui permet à iOS
   // de continuer la lecture quand l'app passe en arrière-plan.
+  // Sur iPhone le volume d'un lecteur audio n'est pas réglable par la page :
+  // les volumes sont donc appliqués directement dans le mixage.
   const at = (name, rate) => {
     const s = samples[name];
     return s.cache[rate] || (s.cache[rate] = resample(s.data, s.rate, rate));
   };
-  function buildSession() {
-    const OUT_RATE = rateFor(cfg.min);
-    const total = cfg.min * 60, cycle = cfg.i + cfg.e;
+  function buildSession(s, amb) {
+    const OUT_RATE = rateFor(s.min);
+    const total = s.min * 60, cycle = s.i + s.e;
     const len = Math.ceil((LEAD + total + TAIL) * OUT_RATE);
     const bytes = new ArrayBuffer(44 + len * 2), v = new DataView(bytes);
     const pcm = new Int16Array(bytes, 44);   // mixage direct en 16 bits : pas de tampon intermédiaire
-    const add = (s, t) => {
-      const o = Math.round((LEAD + t) * OUT_RATE);
-      for (let k = 0; k < s.length && o + k < len; k++) {
-        const x = pcm[o + k] + s[k] * 32767;
-        pcm[o + k] = x > 32767 ? 32767 : x < -32768 ? -32768 : x;
+    const put = (i, x) => { x += pcm[i]; pcm[i] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; };
+
+    if (amb && s.va > 0) {
+      // Boucle avec fondu enchaîné à puissance constante entre deux passages.
+      const N = amb.length, f = Math.min(Math.round(XFADE * OUT_RATE), N >> 1);
+      const fin = Math.round(AMB_IN * OUT_RATE);
+      const endStart = Math.round((LEAD + total) * OUT_RATE), endLen = len - endStart;
+      const g0 = (s.va / 100) * 32767;
+      for (let p = 0, first = true; p < len; p += N - f, first = false) {
+        for (let k = 0; k < N && p + k < len; k++) {
+          const i = p + k;
+          let g = g0;
+          if (first ? k < fin : k < f) g *= Math.sin((k / (first ? fin : f)) * Math.PI / 2);
+          if (k >= N - f) g *= Math.cos(((k - (N - f)) / f) * Math.PI / 2);
+          if (i >= endStart) g *= 1 - (i - endStart) / endLen;   // extinction finale
+          put(i, amb[k] * g);
+        }
       }
+    }
+
+    const gg = (s.vg / 100) * 32767;
+    const add = (smp, t) => {
+      const o = Math.round((LEAD + t) * OUT_RATE);
+      for (let k = 0; k < smp.length && o + k < len; k++) put(o + k, smp[k] * gg);
     };
-    const ins = at("inspire", OUT_RATE), exp = at("expire", OUT_RATE);
-    for (let t = 0; t < total; t += cycle) {
-      add(ins, t);
-      if (t + cfg.i < total) add(exp, t + cfg.i);
+    if (s.vg > 0) {
+      const ins = at("inspire", OUT_RATE), exp = at("expire", OUT_RATE);
+      for (let t = 0; t < total; t += cycle) {
+        add(ins, t);
+        if (t + s.i < total) add(exp, t + s.i);
+      }
     }
     const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
     w(0, "RIFF"); v.setUint32(4, 36 + len * 2, true); w(8, "WAVE"); w(12, "fmt ");
@@ -248,6 +322,7 @@
 
   function frame() {
     if (!running) return;
+    if (!url) { setBall(0); $("phase").textContent = "Préparation..."; requestAnimationFrame(frame); return; }
     const t = player.currentTime - LEAD, cycle = session.i + session.e, total = session.min * 60;
     if (t < 0) { setBall(0); $("phase").textContent = "Inspirez..."; }
     else if (t >= total) { setBall(0); $("phase").textContent = "Terminé"; }
@@ -269,17 +344,43 @@
     else { $("phase").textContent = ""; setBall(0); }
   }
 
+  let gen = 0; // invalide une préparation en cours si l'utilisateur arrête entre-temps
   function stop() {
+    gen++;
     player.pause(); player.removeAttribute("src"); player.load();
     if (url) { URL.revokeObjectURL(url); url = null; }
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
     setRunning(false);
   }
 
+  // Un court silence joué pendant le geste de l'utilisateur « débloque » le lecteur sur iOS :
+  // les lectures suivantes (après chargement asynchrone) sont alors autorisées.
+  const SILENCE = (() => {
+    const n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+    const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 16000, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+    return URL.createObjectURL(new Blob([b], { type: "audio/wav" }));
+  })();
+
+  async function render(s) {
+    await loading;
+    const amb = s.amb ? await loadAmbient(rateFor(s.min)) : null;
+    return URL.createObjectURL(buildSession(s, amb));
+  }
+
   async function start() {
-    if (!samples.inspire || !samples.expire) { $("startText").textContent = "Chargement..."; await loading; }
+    const my = ++gen;
+    player.src = SILENCE; player.play().catch(() => {});
     session = { ...cfg };
-    url = URL.createObjectURL(buildSession());
+    setRunning(true);
+    $("phase").textContent = "Préparation...";
+    let u;
+    try { u = await render(session); }
+    catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
+    if (my !== gen) { URL.revokeObjectURL(u); return; }
+    url = u;
     player.src = url;
     player.currentTime = 0;
     if ("mediaSession" in navigator) {
@@ -293,14 +394,54 @@
       navigator.mediaSession.setActionHandler("pause", () => player.pause());
       navigator.mediaSession.setActionHandler("stop", stop);
     }
-    setRunning(true);
     try { await player.play(); } catch (err) { stop(); alert("Lecture impossible : " + err.message); }
   }
 
-  player.addEventListener("ended", () => setTimeout(stop, 300));
+  // Changement d'ambiance ou de volume pendant une séance : on refait le mixage
+  // et on reprend exactement au même endroit.
+  let remixT;
+  function remix() {
+    if (!running || !url) return;
+    clearTimeout(remixT);
+    remixT = setTimeout(async () => {
+      const my = gen, s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va };
+      let u;
+      try { u = await render(s); } catch (err) { alert("Mise à jour impossible : " + err.message); return; }
+      if (my !== gen || !running) { URL.revokeObjectURL(u); return; }
+      const t = player.currentTime, paused = player.paused, old = url;
+      session = s; url = u;
+      player.src = url;
+      player.addEventListener("loadedmetadata", () => {
+        player.currentTime = t;
+        if (!paused) player.play().catch(() => {});
+      }, { once: true });
+      URL.revokeObjectURL(old);
+    }, 250);
+  }
+
+  function renderSound() {
+    $("music").classList.toggle("on", cfg.amb);
+    $("vg").value = cfg.vg; $("va").value = cfg.va;
+    $("vgVal").textContent = `${cfg.vg} %`; $("vaVal").textContent = `${cfg.va} %`;
+  }
+  $("music").onclick = () => {
+    cfg.amb = !cfg.amb; store.set(cfg); renderSound();
+    if (cfg.amb) loadAmbient(rateFor(running ? session.min : cfg.min)).catch(() => {});
+    remix();
+  };
+  $("vol").onclick = () => $("volBg").classList.add("open");
+  $("volOk").onclick = () => $("volBg").classList.remove("open");
+  $("volBg").addEventListener("click", (e) => { if (e.target === $("volBg")) $("volOk").onclick(); });
+  ["vg", "va"].forEach((k) => {
+    $(k).addEventListener("input", () => { cfg[k] = +$(k).value; renderSound(); });
+    $(k).addEventListener("change", () => { store.set(cfg); remix(); });
+  });
+
+  player.addEventListener("ended", () => { if (url && player.src === url) setTimeout(stop, 300); });
   $("start").onclick = () => (running ? stop() : start());
 
-  renderCfg(); markSel();
+  renderCfg(); markSel(); renderSound();
+  if (cfg.amb) loadAmbient(rateFor(cfg.min)).catch(() => {});
   requestAnimationFrame(() => { scrollToSel(false); setBall(0); });
   window.addEventListener("resize", () => { if (!running) setBall(0); });
 })();
