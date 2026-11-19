@@ -74,6 +74,7 @@
   .cta.stop { background: rgba(255,255,255,.12); }
 
   body.running .mode, body.running .duration { visibility: hidden; }
+  body.running .extras .round { opacity: .35; }
 
   .sheet-bg { position: fixed; inset: 0; background: rgba(5,7,25,.6); display: none; align-items: flex-end; z-index: 10; }
   .sheet-bg.open { display: flex; }
@@ -151,19 +152,16 @@
   const MIN_S = 2, MAX_S = 15;          // bornes inspiration / expiration (s)
   // 1 à 20 min, puis de 10 en 10 jusqu'à 1 h
   const DURATIONS = [...Array.from({ length: 20 }, (_, i) => i + 1), 30, 40, 50, 60];
-  // Fréquence du fichier de séance : réduite pour les longues séances
-  // (60 min à 11 025 Hz ≈ 80 Mo) afin de ménager la mémoire de l'iPhone.
-  const rateFor = (min) => (min <= 20 ? 22050 : 11025);
-  const LEAD = 0.6;                     // silence avant la 1re cloche (s)
-  const TAIL = 4;                       // laisse sonner la dernière cloche (s)
+  const RATE = 32000;                   // stéréo 32 kHz : restitue tout jusqu'à 16 kHz (oiseaux, insectes)
   const XFADE = 4;                      // fondu enchaîné de la boucle d'ambiance (s)
-  const AMB_IN = 2;                     // fondu d'entrée de l'ambiance (s)
+  const GONG_LOOP = 60;                 // sans ambiance : boucle d'environ 1 min de cycles
 
   const $ = (id) => document.getElementById(id);
   const store = {
     get() { try { return JSON.parse(localStorage.getItem("respirelax2") || "{}"); } catch { return {}; } },
     set(v) { try { localStorage.setItem("respirelax2", JSON.stringify(v)); } catch {} },
   };
+  function clamp(v, a, b) { return Math.min(b, Math.max(a, v | 0)); }
   const saved = store.get();
   const cfg = {
     i: clamp(saved.i ?? 7, MIN_S, MAX_S),
@@ -173,110 +171,57 @@
     vg: clamp(saved.vg ?? 90, 0, 100),   // volume gong (%)
     va: clamp(saved.va ?? 50, 0, 100),   // volume ambiance (%)
   };
-  function clamp(v, a, b) { return Math.min(b, Math.max(a, v | 0)); }
 
   // ---------- Sons ----------
-  const samples = {};
-  function parseWav(buf) {
-    const v = new DataView(buf);
-    const ch = v.getUint16(22, true), rate = v.getUint32(24, true), bits = v.getUint16(34, true);
-    let p = 12;
-    while (p < v.byteLength - 8) {
-      const id = String.fromCharCode(v.getUint8(p), v.getUint8(p + 1), v.getUint8(p + 2), v.getUint8(p + 3));
-      const size = v.getUint32(p + 4, true);
-      if (id === "data") {
-        if (bits !== 16) throw new Error("WAV 16 bits attendu");
-        const n = Math.floor(size / 2 / ch), out = new Float32Array(n);
-        for (let k = 0; k < n; k++) out[k] = v.getInt16(p + 8 + k * ch * 2, true) / 32768;
-        return { data: out, rate, cache: {} };
-      }
-      p += 8 + size + (size & 1);
-    }
-    throw new Error("WAV sans données");
-  }
-  function resample(src, from, to) {
-    if (from === to) return src;
-    const ratio = from / to, n = Math.floor(src.length / ratio), out = new Float32Array(n);
-    for (let k = 0; k < n; k++) {             // moyenne sur la fenêtre = filtre passe-bas simple
-      const a = Math.floor(k * ratio), b = Math.max(a + 1, Math.floor((k + 1) * ratio));
-      let s = 0; for (let j = a; j < b; j++) s += src[j]; out[k] = s / (b - a);
-    }
-    return out;
-  }
-  const loading = Promise.all(["inspire", "expire"].map((name) =>
-    fetch(`/respirelax/${name}.wav`).then((r) => r.arrayBuffer()).then((b) => { samples[name] = parseWav(b); })
-  ));
+  // Décodage par le navigateur directement à 32 kHz (rééchantillonnage de qualité), canaux conservés.
+  const decode = (url) => fetch(url).then((r) => r.arrayBuffer())
+    .then((b) => new OfflineAudioContext(2, 1, RATE).decodeAudioData(b))
+    .then((buf) => [buf.getChannelData(0), buf.getChannelData(buf.numberOfChannels > 1 ? 1 : 0)]);
+  const gongs = Promise.all([decode("/respirelax/inspire.wav"), decode("/respirelax/expire.wav")]);
+  let ambP = null;
+  const loadAmbient = () => (ambP = ambP || decode("/respirelax/ambiance.mp3").catch((e) => { ambP = null; throw e; }));
 
-  // Ambiance : décodée en mono à la fréquence de la séance (un seul décodage par fréquence).
-  let ambBytes = null;
-  const ambDecoded = {};
-  function loadAmbient(rate) {
-    if (!ambDecoded[rate]) {
-      ambBytes = ambBytes || fetch("/respirelax/ambiance.mp3").then((r) => r.arrayBuffer());
-      ambDecoded[rate] = ambBytes.then((b) => new OfflineAudioContext(1, 1, rate).decodeAudioData(b.slice(0)))
-        .then((buf) => {
-          if (buf.numberOfChannels === 1) return buf.getChannelData(0);
-          const a = buf.getChannelData(0), c = buf.getChannelData(1), m = new Float32Array(a.length);
-          for (let k = 0; k < a.length; k++) m[k] = (a[k] + c[k]) / 2;
-          return m;
-        })
-        .catch((e) => { delete ambDecoded[rate]; throw e; });
-    }
-    return ambDecoded[rate];
-  }
-
-  // Construit toute la séance dans un seul WAV : c'est ce qui permet à iOS
-  // de continuer la lecture quand l'app passe en arrière-plan.
-  // Sur iPhone le volume d'un lecteur audio n'est pas réglable par la page :
-  // les volumes sont donc appliqués directement dans le mixage.
-  const at = (name, rate) => {
-    const s = samples[name];
-    return s.cache[rate] || (s.cache[rate] = resample(s.data, s.rate, rate));
-  };
-  function buildSession(s, amb) {
-    const OUT_RATE = rateFor(s.min);
-    const total = s.min * 60, cycle = s.i + s.e;
-    const len = Math.ceil((LEAD + total + TAIL) * OUT_RATE);
-    const bytes = new ArrayBuffer(44 + len * 2), v = new DataView(bytes);
-    const pcm = new Int16Array(bytes, 44);   // mixage direct en 16 bits : pas de tampon intermédiaire
-    const put = (i, x) => { x += pcm[i]; pcm[i] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; };
+  // La séance est un fichier WAV « boucle » : un nombre entier de cycles respiratoires,
+  // avec l'ambiance raccordée sur elle-même par un fondu enchaîné. Le lecteur le joue en boucle
+  // (taille fixe quelle que soit la durée, donc stéréo possible même pour 1 h) et la page
+  // compte le temps écoulé pour arrêter la séance.
+  // Un seul lecteur audio : c'est ce qui permet à iOS de continuer en arrière-plan.
+  function buildLoop(s, gong, amb) {
+    const cycle = s.i + s.e, cyc = cycle * RATE;
+    const f = XFADE * RATE;
+    let k = amb ? Math.floor((amb[0].length - f) / cyc) : Math.round(GONG_LOOP / cycle);
+    k = Math.max(1, k);
+    const U = k * cyc;                               // longueur de la boucle (échantillons)
+    const bytes = new ArrayBuffer(44 + U * 4), v = new DataView(bytes);
+    const pcm = new Int16Array(bytes, 44);           // stéréo entrelacé, mixé directement en 16 bits
+    const put = (j, x) => { x = pcm[j] + x * 32767; pcm[j] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; };
 
     if (amb && s.va > 0) {
-      // Boucle avec fondu enchaîné à puissance constante entre deux passages.
-      const N = amb.length, f = Math.min(Math.round(XFADE * OUT_RATE), N >> 1);
-      const fin = Math.round(AMB_IN * OUT_RATE);
-      const endStart = Math.round((LEAD + total) * OUT_RATE), endLen = len - endStart;
-      const g0 = (s.va / 100) * 32767;
-      for (let p = 0, first = true; p < len; p += N - f, first = false) {
-        for (let k = 0; k < N && p + k < len; k++) {
-          const i = p + k;
-          let g = g0;
-          if (first ? k < fin : k < f) g *= Math.sin((k / (first ? fin : f)) * Math.PI / 2);
-          if (k >= N - f) g *= Math.cos(((k - (N - f)) / f) * Math.PI / 2);
-          if (i >= endStart) g *= 1 - (i - endStart) / endLen;   // extinction finale
-          put(i, amb[k] * g);
+      const g = s.va / 100, [aL, aR] = amb, N = aL.length;
+      for (let n = 0; n < U; n++) {
+        let l, r;
+        if (n >= f || U + n >= N) { l = aL[n % N]; r = aR[n % N]; }
+        else {                                       // la fin du segment se fond dans son début
+          const x = n / f, a = Math.sin(x * Math.PI / 2), b = Math.cos(x * Math.PI / 2);
+          l = aL[n] * a + aL[U + n] * b; r = aR[n] * a + aR[U + n] * b;
         }
+        put(2 * n, l * g); put(2 * n + 1, r * g);
       }
+    }
+    if (s.vg > 0) {
+      const g = s.vg / 100;
+      const add = ([sL, sR], start) => {
+        for (let n = 0; n < sL.length; n++) { const j = (start + n) % U; put(2 * j, sL[n] * g); put(2 * j + 1, sR[n] * g); }
+      };
+      for (let c = 0; c < k; c++) { add(gong[0], c * cyc); add(gong[1], c * cyc + s.i * RATE); }
     }
 
-    const gg = (s.vg / 100) * 32767;
-    const add = (smp, t) => {
-      const o = Math.round((LEAD + t) * OUT_RATE);
-      for (let k = 0; k < smp.length && o + k < len; k++) put(o + k, smp[k] * gg);
-    };
-    if (s.vg > 0) {
-      const ins = at("inspire", OUT_RATE), exp = at("expire", OUT_RATE);
-      for (let t = 0; t < total; t += cycle) {
-        add(ins, t);
-        if (t + s.i < total) add(exp, t + s.i);
-      }
-    }
-    const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
-    w(0, "RIFF"); v.setUint32(4, 36 + len * 2, true); w(8, "WAVE"); w(12, "fmt ");
-    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-    v.setUint32(24, OUT_RATE, true); v.setUint32(28, OUT_RATE * 2, true);
-    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, len * 2, true);
-    return new Blob([bytes], { type: "audio/wav" });
+    const w = (o, t) => { for (let q = 0; q < t.length; q++) v.setUint8(o + q, t.charCodeAt(q)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + U * 4, true); w(8, "WAVE"); w(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+    v.setUint32(24, RATE, true); v.setUint32(28, RATE * 4, true);
+    v.setUint16(32, 4, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, U * 4, true);
+    return { blob: new Blob([bytes], { type: "audio/wav" }), period: U / RATE };
   }
 
   // ---------- Interface ----------
@@ -310,9 +255,26 @@
     cfg[b.dataset.k] = clamp(cfg[b.dataset.k] + +b.dataset.d, MIN_S, MAX_S); renderCfg();
   }));
 
+  // Son et volumes : réglés avant la séance. Les changer pendant la lecture obligerait
+  // à recharger le fichier, ce qui fait sauter le son (iOS ne laisse pas la page régler le volume).
+  function renderSound() {
+    $("music").classList.toggle("on", cfg.amb);
+    $("vg").value = cfg.vg; $("va").value = cfg.va;
+    $("vgVal").textContent = `${cfg.vg} %`; $("vaVal").textContent = `${cfg.va} %`;
+  }
+  $("music").onclick = () => {
+    if (running) return;
+    cfg.amb = !cfg.amb; store.set(cfg); renderSound();
+    if (cfg.amb) loadAmbient().catch(() => {});
+  };
+  $("vol").onclick = () => { if (!running) $("volBg").classList.add("open"); };
+  $("volOk").onclick = () => { $("volBg").classList.remove("open"); store.set(cfg); };
+  $("volBg").addEventListener("click", (e) => { if (e.target === $("volBg")) $("volOk").onclick(); });
+  ["vg", "va"].forEach((k) => $(k).addEventListener("input", () => { cfg[k] = +$(k).value; renderSound(); }));
+
   // ---------- Séance ----------
   const player = $("player"), ball = $("ball");
-  let url = null, running = false, session = null;
+  let url = null, running = false, session = null, period = 0, offset = 0, lastCT = 0, endAt = 0, gen = 0;
 
   function setBall(p) { // p : 0 = bas, 1 = haut
     const tube = ball.parentElement, travel = tube.clientHeight - ball.offsetHeight - 8;
@@ -320,17 +282,26 @@
   }
   const ease = (x) => 0.5 - 0.5 * Math.cos(Math.PI * x);
 
+  // Temps écoulé depuis le début : tours de boucle déjà joués + position dans la boucle.
+  function elapsed() {
+    const ct = player.currentTime;
+    if (ct < lastCT - period / 2) offset += period;
+    lastCT = ct;
+    return offset + ct;
+  }
+  function tick() {
+    if (!running || !url) return;
+    if (elapsed() >= endAt) stop();
+  }
+
   function frame() {
     if (!running) return;
     if (!url) { setBall(0); $("phase").textContent = "Préparation..."; requestAnimationFrame(frame); return; }
-    const t = player.currentTime - LEAD, cycle = session.i + session.e, total = session.min * 60;
-    if (t < 0) { setBall(0); $("phase").textContent = "Inspirez..."; }
-    else if (t >= total) { setBall(0); $("phase").textContent = "Terminé"; }
-    else {
-      const c = t % cycle;
-      if (c < session.i) { setBall(ease(c / session.i)); $("phase").textContent = "Inspirez..."; }
-      else { setBall(1 - ease((c - session.i) / session.e)); $("phase").textContent = "Expirez..."; }
-    }
+    const t = elapsed(), cycle = session.i + session.e;
+    if (t >= endAt) { stop(); return; }
+    const c = t % cycle;
+    if (c < session.i) { setBall(ease(c / session.i)); $("phase").textContent = "Inspirez..."; }
+    else { setBall(1 - ease((c - session.i) / session.e)); $("phase").textContent = "Expirez..."; }
     requestAnimationFrame(frame);
   }
 
@@ -344,17 +315,16 @@
     else { $("phase").textContent = ""; setBall(0); }
   }
 
-  let gen = 0; // invalide une préparation en cours si l'utilisateur arrête entre-temps
   function stop() {
     gen++;
-    player.pause(); player.removeAttribute("src"); player.load();
+    player.pause(); player.loop = false; player.removeAttribute("src"); player.load();
     if (url) { URL.revokeObjectURL(url); url = null; }
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
     setRunning(false);
   }
 
   // Un court silence joué pendant le geste de l'utilisateur « débloque » le lecteur sur iOS :
-  // les lectures suivantes (après chargement asynchrone) sont alors autorisées.
+  // la lecture lancée après la préparation (asynchrone) est alors autorisée.
   const SILENCE = (() => {
     const n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
     const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
@@ -364,25 +334,25 @@
     return URL.createObjectURL(new Blob([b], { type: "audio/wav" }));
   })();
 
-  async function render(s) {
-    await loading;
-    const amb = s.amb ? await loadAmbient(rateFor(s.min)) : null;
-    return URL.createObjectURL(buildSession(s, amb));
-  }
-
   async function start() {
     const my = ++gen;
-    player.src = SILENCE; player.play().catch(() => {});
+    player.loop = false; player.src = SILENCE; player.play().catch(() => {});
     session = { ...cfg };
     setRunning(true);
-    $("phase").textContent = "Préparation...";
-    let u;
-    try { u = await render(session); }
-    catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
-    if (my !== gen) { URL.revokeObjectURL(u); return; }
-    url = u;
-    player.src = url;
-    player.currentTime = 0;
+    let built;
+    try {
+      const [gong, amb] = await Promise.all([gongs, session.amb ? loadAmbient() : null]);
+      if (my !== gen) return;
+      built = buildLoop(session, gong, amb);
+    } catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
+    if (my !== gen) return;
+    const cycle = session.i + session.e, total = session.min * 60;
+    // Fin : juste avant le premier gong qui tomberait après la durée choisie,
+    // pour laisser le dernier gong sonner jusqu'au bout.
+    endAt = Math.ceil(total / cycle - 1e-9) * cycle - 0.05;
+    period = built.period; offset = 0; lastCT = 0;
+    url = URL.createObjectURL(built.blob);
+    player.src = url; player.loop = true; player.currentTime = 0;
     if ("mediaSession" in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: `Cohérence cardiaque ${session.i}/${session.e} s`,
@@ -397,51 +367,11 @@
     try { await player.play(); } catch (err) { stop(); alert("Lecture impossible : " + err.message); }
   }
 
-  // Changement d'ambiance ou de volume pendant une séance : on refait le mixage
-  // et on reprend exactement au même endroit.
-  let remixT;
-  function remix() {
-    if (!running || !url) return;
-    clearTimeout(remixT);
-    remixT = setTimeout(async () => {
-      const my = gen, s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va };
-      let u;
-      try { u = await render(s); } catch (err) { alert("Mise à jour impossible : " + err.message); return; }
-      if (my !== gen || !running) { URL.revokeObjectURL(u); return; }
-      const t = player.currentTime, paused = player.paused, old = url;
-      session = s; url = u;
-      player.src = url;
-      player.addEventListener("loadedmetadata", () => {
-        player.currentTime = t;
-        if (!paused) player.play().catch(() => {});
-      }, { once: true });
-      URL.revokeObjectURL(old);
-    }, 250);
-  }
-
-  function renderSound() {
-    $("music").classList.toggle("on", cfg.amb);
-    $("vg").value = cfg.vg; $("va").value = cfg.va;
-    $("vgVal").textContent = `${cfg.vg} %`; $("vaVal").textContent = `${cfg.va} %`;
-  }
-  $("music").onclick = () => {
-    cfg.amb = !cfg.amb; store.set(cfg); renderSound();
-    if (cfg.amb) loadAmbient(rateFor(running ? session.min : cfg.min)).catch(() => {});
-    remix();
-  };
-  $("vol").onclick = () => $("volBg").classList.add("open");
-  $("volOk").onclick = () => $("volBg").classList.remove("open");
-  $("volBg").addEventListener("click", (e) => { if (e.target === $("volBg")) $("volOk").onclick(); });
-  ["vg", "va"].forEach((k) => {
-    $(k).addEventListener("input", () => { cfg[k] = +$(k).value; renderSound(); });
-    $(k).addEventListener("change", () => { store.set(cfg); remix(); });
-  });
-
-  player.addEventListener("ended", () => { if (url && player.src === url) setTimeout(stop, 300); });
+  player.addEventListener("timeupdate", tick);   // continue d'arrêter la séance quand l'écran est éteint
   $("start").onclick = () => (running ? stop() : start());
 
   renderCfg(); markSel(); renderSound();
-  if (cfg.amb) loadAmbient(rateFor(cfg.min)).catch(() => {});
+  if (cfg.amb) loadAmbient().catch(() => {});
   requestAnimationFrame(() => { scrollToSel(false); setBall(0); });
   window.addEventListener("resize", () => { if (!running) setBall(0); });
 })();
