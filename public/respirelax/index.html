@@ -74,7 +74,6 @@
   .cta.stop { background: rgba(255,255,255,.12); }
 
   body.running .mode, body.running .duration { visibility: hidden; }
-  body.running .extras .round { opacity: .35; }
 
   .sheet-bg { position: fixed; inset: 0; background: rgba(5,7,25,.6); display: none; align-items: flex-end; z-index: 10; }
   .sheet-bg.open { display: flex; }
@@ -146,6 +145,7 @@
 </div>
 
 <audio id="player" playsinline preload="auto"></audio>
+<audio id="player2" playsinline preload="auto"></audio>
 
 <script>
 (() => {
@@ -255,26 +255,31 @@
     cfg[b.dataset.k] = clamp(cfg[b.dataset.k] + +b.dataset.d, MIN_S, MAX_S); renderCfg();
   }));
 
-  // Son et volumes : réglés avant la séance. Les changer pendant la lecture obligerait
-  // à recharger le fichier, ce qui fait sauter le son (iOS ne laisse pas la page régler le volume).
+  // Son et volumes : modifiables à tout moment. Pendant une séance, le nouveau mixage est
+  // préparé dans un second lecteur, calé à la même position, puis on bascule de l'un à l'autre
+  // sans recharger celui qui joue (iOS ne laisse pas la page régler le volume d'un lecteur).
   function renderSound() {
     $("music").classList.toggle("on", cfg.amb);
     $("vg").value = cfg.vg; $("va").value = cfg.va;
     $("vgVal").textContent = `${cfg.vg} %`; $("vaVal").textContent = `${cfg.va} %`;
   }
   $("music").onclick = () => {
-    if (running) return;
     cfg.amb = !cfg.amb; store.set(cfg); renderSound();
     if (cfg.amb) loadAmbient().catch(() => {});
+    remix(0);
   };
-  $("vol").onclick = () => { if (!running) $("volBg").classList.add("open"); };
+  $("vol").onclick = () => $("volBg").classList.add("open");
   $("volOk").onclick = () => { $("volBg").classList.remove("open"); store.set(cfg); };
   $("volBg").addEventListener("click", (e) => { if (e.target === $("volBg")) $("volOk").onclick(); });
-  ["vg", "va"].forEach((k) => $(k).addEventListener("input", () => { cfg[k] = +$(k).value; renderSound(); }));
+  ["vg", "va"].forEach((k) => {
+    $(k).addEventListener("input", () => { cfg[k] = +$(k).value; renderSound(); });
+    $(k).addEventListener("change", () => { store.set(cfg); remix(300); });
+  });
 
   // ---------- Séance ----------
-  const player = $("player"), ball = $("ball");
-  let url = null, running = false, session = null, period = 0, offset = 0, lastCT = 0, endAt = 0, gen = 0;
+  const ball = $("ball");
+  let player = $("player"), spare = $("player2");
+  let url = null, running = false, session = null, period = 0, offset = 0, lastCT = 0, endAt = 0, gen = 0, mixGen = 0;
 
   function setBall(p) { // p : 0 = bas, 1 = haut
     const tube = ball.parentElement, travel = tube.clientHeight - ball.offsetHeight - 8;
@@ -289,8 +294,8 @@
     lastCT = ct;
     return offset + ct;
   }
-  function tick() {
-    if (!running || !url) return;
+  function tick(e) {
+    if (!running || !url || e.target !== player) return;
     if (elapsed() >= endAt) stop();
   }
 
@@ -315,16 +320,21 @@
     else { $("phase").textContent = ""; setBall(0); }
   }
 
+  const clear = (el) => {
+    const old = el.src;
+    el.pause(); el.loop = false; el.removeAttribute("src"); el.load();
+    if (old.startsWith("blob:") && old !== SILENCE) URL.revokeObjectURL(old);
+  };
   function stop() {
-    gen++;
-    player.pause(); player.loop = false; player.removeAttribute("src"); player.load();
-    if (url) { URL.revokeObjectURL(url); url = null; }
+    gen++; mixGen++;
+    clear(player); clear(spare);
+    url = null;
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
     setRunning(false);
   }
 
-  // Un court silence joué pendant le geste de l'utilisateur « débloque » le lecteur sur iOS :
-  // la lecture lancée après la préparation (asynchrone) est alors autorisée.
+  // Un court silence joué pendant le geste de l'utilisateur « débloque » les lecteurs sur iOS :
+  // les lectures lancées plus tard (après préparation) sont alors autorisées.
   const SILENCE = (() => {
     const n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
     const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
@@ -333,24 +343,29 @@
     v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
     return URL.createObjectURL(new Blob([b], { type: "audio/wav" }));
   })();
+  const unlock = (el) => { el.loop = false; el.src = SILENCE; el.play().catch(() => {}); };
+  const once = (el, ev) => new Promise((res) => el.addEventListener(ev, res, { once: true }));
+
+  async function prepare(s) {
+    const [gong, amb] = await Promise.all([gongs, s.amb ? loadAmbient() : null]);
+    return buildLoop(s, gong, amb);
+  }
 
   async function start() {
     const my = ++gen;
-    player.loop = false; player.src = SILENCE; player.play().catch(() => {});
+    unlock(player); unlock(spare);
     session = { ...cfg };
     setRunning(true);
     let built;
-    try {
-      const [gong, amb] = await Promise.all([gongs, session.amb ? loadAmbient() : null]);
-      if (my !== gen) return;
-      built = buildLoop(session, gong, amb);
-    } catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
+    try { built = await prepare(session); }
+    catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
     if (my !== gen) return;
     const cycle = session.i + session.e, total = session.min * 60;
     // Fin : juste avant le premier gong qui tomberait après la durée choisie,
     // pour laisser le dernier gong sonner jusqu'au bout.
     endAt = Math.ceil(total / cycle - 1e-9) * cycle - 0.05;
     period = built.period; offset = 0; lastCT = 0;
+    spare.pause();
     url = URL.createObjectURL(built.blob);
     player.src = url; player.loop = true; player.currentTime = 0;
     if ("mediaSession" in navigator) {
@@ -367,7 +382,46 @@
     try { await player.play(); } catch (err) { stop(); alert("Lecture impossible : " + err.message); }
   }
 
-  player.addEventListener("timeupdate", tick);   // continue d'arrêter la séance quand l'écran est éteint
+  // Nouveau mixage pendant la séance, enchaîné sans coupure.
+  let mixT;
+  function remix(delay) {
+    if (!running || !url) return;
+    clearTimeout(mixT);
+    mixT = setTimeout(async () => {
+      const my = ++mixGen, g = gen;
+      const stale = () => my !== mixGen || g !== gen || !running;
+      const s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va };
+      let built;
+      try { built = await prepare(s); } catch (err) { if (!stale()) alert("Mise à jour impossible : " + err.message); return; }
+      if (stale()) return;
+      const nurl = URL.createObjectURL(built.blob), next = spare;
+      next.pause(); next.loop = true; next.src = nurl;
+      await once(next, "loadeddata");
+      if (stale()) { URL.revokeObjectURL(nurl); return; }
+      // On cale le second lecteur un peu en avance, puis on bascule pile à ce moment-là.
+      const target = elapsed() + 0.3;
+      next.currentTime = target % built.period;
+      await once(next, "seeked");
+      if (stale()) { URL.revokeObjectURL(nurl); return; }
+      await new Promise((res) => {
+        const chk = () => (stale() || player.paused || elapsed() >= target - 0.005 ? res() : setTimeout(chk, 2));
+        chk();
+      });
+      if (stale()) { URL.revokeObjectURL(nurl); return; }
+      const wasPaused = player.paused, old = player, oldUrl = url;
+      const pos = wasPaused ? elapsed() : target;
+      if (wasPaused) next.currentTime = pos % built.period;
+      else { next.play().catch(() => {}); old.pause(); }
+      player = next; spare = old; url = nurl;
+      session = s; period = built.period;
+      lastCT = pos % period; offset = pos - lastCT;
+      old.loop = false; old.removeAttribute("src"); old.load();
+      URL.revokeObjectURL(oldUrl);
+    }, delay);
+  }
+
+  $("player").addEventListener("timeupdate", tick);   // continue d'arrêter la séance quand l'écran est éteint
+  $("player2").addEventListener("timeupdate", tick);
   $("start").onclick = () => (running ? stop() : start());
 
   renderCfg(); markSel(); renderSound();
