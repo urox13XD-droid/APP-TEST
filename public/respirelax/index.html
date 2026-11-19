@@ -154,6 +154,7 @@
   const DURATIONS = [...Array.from({ length: 20 }, (_, i) => i + 1), 30, 40, 50, 60];
   const RATE = 32000;                   // stéréo 32 kHz : restitue tout jusqu'à 16 kHz (oiseaux, insectes)
   const XFADE = 4;                      // fondu enchaîné de la boucle d'ambiance (s)
+  const FADE_IN = 30;                   // montée progressive de l'ambiance (s)
   const GONG_LOOP = 60;                 // sans ambiance : boucle d'environ 1 min de cycles
 
   const $ = (id) => document.getElementById(id);
@@ -186,7 +187,8 @@
   // (taille fixe quelle que soit la durée, donc stéréo possible même pour 1 h) et la page
   // compte le temps écoulé pour arrêter la séance.
   // Un seul lecteur audio : c'est ce qui permet à iOS de continuer en arrière-plan.
-  function buildLoop(s, gong, amb) {
+  // fade : { from } = instant (temps de séance) où l'ambiance commence sa montée, ou null.
+  function buildLoop(s, gong, amb, fade) {
     const cycle = s.i + s.e, cyc = cycle * RATE;
     const f = XFADE * RATE;
     let k = amb ? Math.floor((amb[0].length - f) / cyc) : Math.round(GONG_LOOP / cycle);
@@ -197,9 +199,15 @@
     const put = (j, x) => { x = pcm[j] + x * 32767; pcm[j] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; };
 
     if (amb && s.va > 0) {
-      const g = s.va / 100, [aL, aR] = amb, N = aL.length;
+      const g0 = s.va / 100, [aL, aR] = amb, N = aL.length;
+      const F = FADE_IN * RATE, from = fade ? Math.round((fade.from % (U / RATE)) * RATE) : 0;
       for (let n = 0; n < U; n++) {
-        let l, r;
+        let l, r, g = g0;
+        if (fade) {                                  // crescendo doux (courbe en S) à partir de « from »
+          const d = (n - from + U) % U;
+          if (d < F) g *= 0.5 - 0.5 * Math.cos(Math.PI * d / F);
+          else if (d > U - 10 * RATE) g = 0;         // silence juste avant, au cas où la bascule arrive tôt
+        }
         if (n >= f || U + n >= N) { l = aL[n % N]; r = aR[n % N]; }
         else {                                       // la fin du segment se fond dans son début
           const x = n / f, a = Math.sin(x * Math.PI / 2), b = Math.cos(x * Math.PI / 2);
@@ -266,6 +274,8 @@
   $("music").onclick = () => {
     cfg.amb = !cfg.amb; store.set(cfg); renderSound();
     if (cfg.amb) loadAmbient().catch(() => {});
+    // En cours de séance, l'ambiance arrive aussi en crescendo (départ ~3 s après l'appui).
+    fade = cfg.amb && running && url ? { from: elapsed() + 3 } : null;
     remix(0);
   };
   $("vol").onclick = () => $("volBg").classList.add("open");
@@ -296,7 +306,7 @@
   }
   function tick(e) {
     if (!running || !url || e.target !== player) return;
-    if (elapsed() >= endAt) stop();
+    if (elapsed() >= endAt) stop(); else fadeDone();
   }
 
   function frame() {
@@ -304,6 +314,7 @@
     if (!url) { setBall(0); $("phase").textContent = "Préparation..."; requestAnimationFrame(frame); return; }
     const t = elapsed(), cycle = session.i + session.e;
     if (t >= endAt) { stop(); return; }
+    fadeDone();
     const c = t % cycle;
     if (c < session.i) { setBall(ease(c / session.i)); $("phase").textContent = "Inspirez..."; }
     else { setBall(1 - ease((c - session.i) / session.e)); $("phase").textContent = "Expirez..."; }
@@ -326,7 +337,7 @@
     if (old.startsWith("blob:") && old !== SILENCE) URL.revokeObjectURL(old);
   };
   function stop() {
-    gen++; mixGen++;
+    gen++; mixGen++; fade = null;
     clear(player); clear(spare);
     url = null;
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
@@ -346,9 +357,9 @@
   const unlock = (el) => { el.loop = false; el.src = SILENCE; el.play().catch(() => {}); };
   const once = (el, ev) => new Promise((res) => el.addEventListener(ev, res, { once: true }));
 
-  async function prepare(s) {
+  async function prepare(s, fade) {
     const [gong, amb] = await Promise.all([gongs, s.amb ? loadAmbient() : null]);
-    return buildLoop(s, gong, amb);
+    return buildLoop(s, gong, amb, fade);
   }
 
   async function start() {
@@ -357,7 +368,8 @@
     session = { ...cfg };
     setRunning(true);
     let built;
-    try { built = await prepare(session); }
+    fade = session.amb ? { from: 0 } : null;
+    try { built = await prepare(session, fade); }
     catch (err) { if (my === gen) { stop(); alert("Préparation impossible : " + err.message); } return; }
     if (my !== gen) return;
     const cycle = session.i + session.e, total = session.min * 60;
@@ -384,15 +396,22 @@
 
   // Nouveau mixage pendant la séance, enchaîné sans coupure.
   let mixT;
+  // Une fois la montée terminée, on repasse sur la boucle normale (sinon la montée
+  // se rejouerait à chaque tour de boucle).
+  let fade = null;
+  function fadeDone() {
+    if (fade && elapsed() >= fade.from + FADE_IN + 0.5) { fade = null; remix(0); }
+  }
+
   function remix(delay) {
     if (!running || !url) return;
     clearTimeout(mixT);
     mixT = setTimeout(async () => {
       const my = ++mixGen, g = gen;
       const stale = () => my !== mixGen || g !== gen || !running;
-      const s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va };
+      const s = { ...session, amb: cfg.amb, vg: cfg.vg, va: cfg.va }, f = s.amb ? fade : null;
       let built;
-      try { built = await prepare(s); } catch (err) { if (!stale()) alert("Mise à jour impossible : " + err.message); return; }
+      try { built = await prepare(s, f); } catch (err) { if (!stale()) alert("Mise à jour impossible : " + err.message); return; }
       if (stale()) return;
       const nurl = URL.createObjectURL(built.blob), next = spare;
       next.pause(); next.loop = true; next.src = nurl;
