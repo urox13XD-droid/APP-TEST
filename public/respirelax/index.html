@@ -37,18 +37,17 @@
   .stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; min-height: 0; }
   .tube { position: relative; width: 62px; height: min(400px, 46vh); border-radius: 31px;
     background: linear-gradient(180deg, var(--tube) 0%, #1d2580 60%, #1a2170 100%); overflow: hidden; }
-  .tube::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 36px;
+  .tube::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 36px; z-index: 0;
     background: var(--tube-top); border-radius: 31px 31px 0 0; }
-  .tube::after { content: ""; position: absolute; left: -10%; right: -10%; top: 26px; height: 20px;
+  .tube::after { content: ""; position: absolute; left: -10%; right: -10%; top: 26px; height: 20px; z-index: 0;
     background: radial-gradient(ellipse at 50% 0%, var(--tube-top) 60%, transparent 62%); }
-  .ball { position: absolute; left: 50%; width: 54px; height: 54px; margin-left: -27px; border-radius: 50%;
+  .ball { position: absolute; z-index: 1; left: 50%; width: 54px; height: 54px; margin-left: -27px; border-radius: 50%;
     background:
       radial-gradient(circle at 70% 75%, rgba(120,170,255,.75) 0%, rgba(120,170,255,0) 35%),
       radial-gradient(circle at 35% 30%, #2a4fd0 0%, #1b2fa0 55%, #141f78 100%);
     box-shadow: inset 0 0 0 1px rgba(160,190,255,.35), 0 0 18px rgba(60,100,255,.25);
     will-change: transform; }
   .phase { margin-top: 26px; height: 22px; font-size: 18px; font-weight: 600; color: var(--text); }
-  .remain { margin-top: 6px; height: 18px; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
   .duration { width: 100%; text-align: center; }
   .duration .label { font-size: 15px; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
@@ -92,7 +91,6 @@
   <section class="stage">
     <div class="tube"><div class="ball" id="ball"></div></div>
     <div class="phase" id="phase"></div>
-    <div class="remain" id="remain"></div>
   </section>
 
   <section class="duration">
@@ -122,8 +120,11 @@
 <script>
 (() => {
   const MIN_S = 2, MAX_S = 15;          // bornes inspiration / expiration (s)
-  const DURATIONS = Array.from({ length: 20 }, (_, i) => i + 1); // 1 à 20 min
-  const OUT_RATE = 22050;               // fréquence du fichier de séance
+  // 1 à 20 min, puis de 10 en 10 jusqu'à 1 h
+  const DURATIONS = [...Array.from({ length: 20 }, (_, i) => i + 1), 30, 40, 50, 60];
+  // Fréquence du fichier de séance : réduite pour les longues séances
+  // (60 min à 11 025 Hz ≈ 80 Mo) afin de ménager la mémoire de l'iPhone.
+  const rateFor = (min) => (min <= 20 ? 22050 : 11025);
   const LEAD = 0.6;                     // silence avant la 1re cloche (s)
   const TAIL = 4;                       // laisse sonner la dernière cloche (s)
 
@@ -153,7 +154,7 @@
         if (bits !== 16) throw new Error("WAV 16 bits attendu");
         const n = Math.floor(size / 2 / ch), out = new Float32Array(n);
         for (let k = 0; k < n; k++) out[k] = v.getInt16(p + 8 + k * ch * 2, true) / 32768;
-        return resample(out, rate, OUT_RATE);
+        return { data: out, rate, cache: {} };
       }
       p += 8 + size + (size & 1);
     }
@@ -174,26 +175,33 @@
 
   // Construit toute la séance dans un seul WAV : c'est ce qui permet à iOS
   // de continuer la lecture quand l'app passe en arrière-plan.
+  const at = (name, rate) => {
+    const s = samples[name];
+    return s.cache[rate] || (s.cache[rate] = resample(s.data, s.rate, rate));
+  };
   function buildSession() {
+    const OUT_RATE = rateFor(cfg.min);
     const total = cfg.min * 60, cycle = cfg.i + cfg.e;
     const len = Math.ceil((LEAD + total + TAIL) * OUT_RATE);
-    const mix = new Float32Array(len);
+    const bytes = new ArrayBuffer(44 + len * 2), v = new DataView(bytes);
+    const pcm = new Int16Array(bytes, 44);   // mixage direct en 16 bits : pas de tampon intermédiaire
     const add = (s, t) => {
       const o = Math.round((LEAD + t) * OUT_RATE);
-      for (let k = 0; k < s.length && o + k < len; k++) mix[o + k] += s[k];
+      for (let k = 0; k < s.length && o + k < len; k++) {
+        const x = pcm[o + k] + s[k] * 32767;
+        pcm[o + k] = x > 32767 ? 32767 : x < -32768 ? -32768 : x;
+      }
     };
+    const ins = at("inspire", OUT_RATE), exp = at("expire", OUT_RATE);
     for (let t = 0; t < total; t += cycle) {
-      add(samples.inspire, t);
-      if (t + cfg.i < total) add(samples.expire, t + cfg.i);
+      add(ins, t);
+      if (t + cfg.i < total) add(exp, t + cfg.i);
     }
-    const bytes = new ArrayBuffer(44 + len * 2), v = new DataView(bytes);
     const w = (o, s) => { for (let k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
     w(0, "RIFF"); v.setUint32(4, 36 + len * 2, true); w(8, "WAVE"); w(12, "fmt ");
     v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
     v.setUint32(24, OUT_RATE, true); v.setUint32(28, OUT_RATE * 2, true);
     v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, len * 2, true);
-    const pcm = new Int16Array(bytes, 44);
-    for (let k = 0; k < len; k++) { const x = Math.max(-1, Math.min(1, mix[k])); pcm[k] = x * 32767; }
     return new Blob([bytes], { type: "audio/wav" });
   }
 
@@ -203,7 +211,7 @@
   const items = [...picker.children];
   function markSel() { items.forEach((d) => d.classList.toggle("sel", +d.dataset.m === cfg.min)); }
   function scrollToSel(smooth) {
-    const el = items[cfg.min - 1];
+    const el = items[DURATIONS.indexOf(cfg.min)];
     picker.scrollTo({ left: el.offsetLeft - (picker.clientWidth - el.offsetWidth) / 2, behavior: smooth ? "smooth" : "auto" });
   }
   let scrollT;
@@ -248,8 +256,6 @@
       if (c < session.i) { setBall(ease(c / session.i)); $("phase").textContent = "Inspirez..."; }
       else { setBall(1 - ease((c - session.i) / session.e)); $("phase").textContent = "Expirez..."; }
     }
-    const left = Math.max(0, Math.ceil(total - Math.max(0, t)));
-    $("remain").textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
     requestAnimationFrame(frame);
   }
 
@@ -260,7 +266,7 @@
     $("startText").textContent = on ? "Arrêter" : "Commencer la séance";
     $("startIcon").style.display = on ? "none" : "";
     if (on) requestAnimationFrame(frame);
-    else { $("phase").textContent = ""; $("remain").textContent = ""; setBall(0); }
+    else { $("phase").textContent = ""; setBall(0); }
   }
 
   function stop() {
